@@ -1,0 +1,61 @@
+name: Publish Tor exit list
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: latest
+  ASSET: tor-exit-list.csv
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Generate CSV
+        run: |
+          set -euo pipefail
+          # The archive for a new month may not exist yet right after month start,
+          # so fall back to the previous month's archive on failure.
+          if ! uv run python main.py > "$ASSET"; then
+            prev=$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%Y-%m)
+            echo "Current month archive unavailable, falling back to exit-list-$prev.tar.xz"
+            uv run python main.py --filename "exit-list-$prev.tar.xz" > "$ASSET"
+          fi
+          rows=$(($(wc -l < "$ASSET") - 1))
+          if [ "$rows" -le 0 ]; then
+            echo "CSV is empty, refusing to publish"
+            exit 1
+          fi
+          echo "ROWS=$rows" >> "$GITHUB_ENV"
+          echo "UPDATED=$(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_ENV"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="Tor exit node list, updated $UPDATED ($ROWS exit nodes).
+
+          Download: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/${ASSET}"
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$ASSET" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$RELEASE_TAG" --title "Tor exit list" --notes "$notes" --latest --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" "$ASSET" --target "$GITHUB_SHA" --title "Tor exit list" --notes "$notes" --latest --repo "$GITHUB_REPOSITORY"
+          fi
